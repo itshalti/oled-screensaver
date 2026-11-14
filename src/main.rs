@@ -19,6 +19,7 @@ use wayland_client::{
         wl_keyboard::{self, WlKeyboard},
         wl_output::{self, WlOutput},
         wl_pointer::{self, WlPointer},
+        wl_region::WlRegion,
         wl_registry::{self, WlRegistry},
         wl_seat::{self, WlSeat},
         wl_surface::WlSurface,
@@ -156,6 +157,7 @@ fn run() -> Result<(), Box<dyn Error>> {
 
     let frame = if fps > 0.0 { Duration::from_secs_f64(1.0 / fps) } else { Duration::ZERO };
     let mut next = Instant::now();
+    let mut opaque = false;
     loop {
         queue.dispatch_pending(&mut state)?;
         queue.flush()?;
@@ -168,7 +170,15 @@ fn run() -> Result<(), Box<dyn Error>> {
 
         let now = Instant::now();
         if now >= next {
-            renderer.render();
+            if renderer.render() && !opaque {
+                // Fully black now: tell the compositor, so it stops drawing the desktop underneath.
+                // Applies with the next frame's commit.
+                let region = compositor.create_region(&qh, ());
+                region.add(0, 0, i32::MAX, i32::MAX);
+                surface.set_opaque_region(Some(&region));
+                region.destroy();
+                opaque = true;
+            }
             next += frame;
             if next < now {
                 next = now + frame; // fell behind: don't try to catch up
@@ -253,6 +263,7 @@ impl Dispatch<ZwlrLayerSurfaceV1, ()> for State {
 
 delegate_noop!(State: ignore WlCompositor);
 delegate_noop!(State: ignore WlSurface);
+delegate_noop!(State: ignore WlRegion);
 delegate_noop!(State: ignore ZwlrLayerShellV1);
 
 #[cfg(test)]

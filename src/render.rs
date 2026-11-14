@@ -265,7 +265,8 @@ impl Renderer {
         self.text_key = time;
     }
 
-    pub fn render(&mut self) {
+    /// Draws one frame; returns true once the backdrop is fully black (surface opaque).
+    pub fn render(&mut self) -> bool {
         let now = self.start.elapsed().as_secs_f64();
         if now - self.mode_start >= MODE_SECS as f64 {
             let step = 1 + xorshift(&mut self.rng) as usize % (MODES.len() - 1); // never the same mode twice
@@ -293,9 +294,9 @@ impl Renderer {
             wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
                 self.surface.configure(&self.device, &self.config);
-                return;
+                return false;
             }
-            _ => return, // timeout / occluded: skip this frame
+            _ => return false, // timeout / occluded: skip this frame
         };
         let view = frame.texture.create_view(&Default::default());
         let mut enc = self.device.create_command_encoder(&Default::default());
@@ -324,6 +325,7 @@ impl Renderer {
         }
         self.queue.submit([enc.finish()]);
         self.queue.present(frame);
+        black >= 1.0
     }
 }
 
