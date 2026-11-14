@@ -273,9 +273,7 @@ impl Renderer {
             self.mode_start = t;
             self.mode_delay = 0.0;
         }
-        let ease = |x: f32| 0.5 - 0.5 * (PI * x.clamp(0.0, 1.0)).cos();
-        let fade = ease((t - self.mode_start - self.mode_delay) / FADE_IN).min(ease((self.mode_start + MODE_SECS - t) / FADE_OUT));
-        let black = ease(t / BLACK_FADE);
+        let (black, fade) = fades(t, self.mode_start, self.mode_delay);
 
         let (w, h) = (self.config.width as f32, self.config.height as f32);
         let mut rect = [0.0f32; 4];
@@ -327,9 +325,59 @@ impl Renderer {
     }
 }
 
+/// (backdrop opacity, animation opacity) at `t` seconds since start, for a mode that
+/// began at `mode_start` and waits `delay` before fading in.
+fn fades(t: f32, mode_start: f32, delay: f32) -> (f32, f32) {
+    let ease = |x: f32| 0.5 - 0.5 * (PI * x.clamp(0.0, 1.0)).cos();
+    let content = ease((t - mode_start - delay) / FADE_IN).min(ease((mode_start + MODE_SECS - t) / FADE_OUT));
+    (ease(t / BLACK_FADE), content)
+}
+
 fn xorshift(s: &mut u64) -> u64 {
     *s ^= *s << 13;
     *s ^= *s >> 7;
     *s ^= *s << 17;
     *s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backdrop_fades_in_once_and_stays_black() {
+        let (b0, _) = fades(0.0, 0.0, FIRST_DELAY);
+        assert_eq!(b0, 0.0, "starts transparent so the desktop is visible");
+        let mut prev = 0.0;
+        for i in 0..=100 {
+            let (b, _) = fades(i as f32 * 0.05, 0.0, FIRST_DELAY);
+            assert!(b >= prev, "backdrop must never brighten back to the desktop");
+            prev = b;
+        }
+        assert_eq!(fades(BLACK_FADE, 0.0, FIRST_DELAY).0, 1.0);
+        assert_eq!(fades(10_000.0, 0.0, FIRST_DELAY).0, 1.0);
+    }
+
+    #[test]
+    fn animation_fades_in_after_delay_and_out_before_switch() {
+        assert_eq!(fades(FIRST_DELAY, 0.0, FIRST_DELAY).1, 0.0);
+        assert_eq!(fades(FIRST_DELAY + FADE_IN, 0.0, FIRST_DELAY).1, 1.0);
+        assert_eq!(fades(MODE_SECS / 2.0, 0.0, FIRST_DELAY).1, 1.0);
+        assert!(fades(MODE_SECS - FADE_OUT / 2.0, 0.0, FIRST_DELAY).1 < 1.0);
+        assert_eq!(fades(MODE_SECS, 0.0, FIRST_DELAY).1, 0.0);
+        // next mode starts at MODE_SECS without the initial delay
+        assert_eq!(fades(MODE_SECS + FADE_IN, MODE_SECS, 0.0).1, 1.0);
+    }
+
+    #[test]
+    fn mode_tables_match_shader_segment_counts() {
+        let src = include_str!("../shaders/screensaver.wgsl");
+        for (name, draws) in MODES {
+            for d in *draws {
+                assert!(src.contains(&format!("fn {}(", d.vs)), "{name}: missing {}", d.vs);
+                assert!(src.contains(&format!("fn {}(", d.fs)), "{name}: missing {}", d.fs);
+            }
+        }
+        assert!(src.contains("const LSEG: f32 = 600.0;") && src.contains("const WSEG: f32 = 256.0;"));
+    }
 }

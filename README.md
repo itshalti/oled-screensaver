@@ -39,4 +39,7 @@ Idle daemon (e.g. Noctalia → Power → Idle → Custom behavior, timeout 600):
 - Idle command: `~/.local/bin/ss-for-oled start`
 - Resume command: `~/.local/bin/ss-for-oled stop`
 
+Use the full path: idle daemons often don't have `~/.local/bin` in their `PATH`.
+In Noctalia also set **Idle Dim to 0** — the screensaver fades in by itself, otherwise you get two fades in a row.
+
 Options: `SCREENSAVER_OUTPUT=DP-1` (monitor), `SCREENSAVER_MODE=Topo` (start mode), `SCREENSAVER_FPS=60` (frame cap; default = monitor refresh).

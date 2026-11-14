@@ -58,7 +58,11 @@ fn pidfile() -> std::path::PathBuf {
 
 /// PID of a running screensaver, if the pidfile points at a live `ss-for-oled` process.
 fn running_pid() -> Option<i32> {
-    let pid: i32 = std::fs::read_to_string(pidfile()).ok()?.trim().parse().ok()?;
+    pid_from(&pidfile())
+}
+
+fn pid_from(file: &std::path::Path) -> Option<i32> {
+    let pid: i32 = std::fs::read_to_string(file).ok()?.trim().parse().ok()?;
     let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
     (comm.trim() == NAME && pid != std::process::id() as i32).then_some(pid)
 }
@@ -250,3 +254,23 @@ impl Dispatch<ZwlrLayerSurfaceV1, ()> for State {
 delegate_noop!(State: ignore WlCompositor);
 delegate_noop!(State: ignore WlSurface);
 delegate_noop!(State: ignore ZwlrLayerShellV1);
+
+#[cfg(test)]
+mod tests {
+    use super::pid_from;
+
+    #[test]
+    fn stale_or_bad_pidfile_is_not_running() {
+        let dir = std::env::temp_dir().join(format!("ss-for-oled-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("pid");
+        assert_eq!(pid_from(&f), None, "missing file");
+        std::fs::write(&f, "garbage").unwrap();
+        assert_eq!(pid_from(&f), None, "unparsable");
+        std::fs::write(&f, "1").unwrap();
+        assert_eq!(pid_from(&f), None, "pid 1 is not ss-for-oled");
+        std::fs::write(&f, std::process::id().to_string()).unwrap();
+        assert_eq!(pid_from(&f), None, "own pid never counts");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}
