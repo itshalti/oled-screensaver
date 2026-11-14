@@ -51,7 +51,7 @@ pub struct Renderer {
     text_key: String,
     start: Instant,
     mode: usize,
-    mode_start: f32,
+    mode_start: f64,
     mode_delay: f32,
     rng: u64,
 }
@@ -266,14 +266,16 @@ impl Renderer {
     }
 
     pub fn render(&mut self) {
-        let t = self.start.elapsed().as_secs_f32();
-        if t - self.mode_start >= MODE_SECS {
+        let now = self.start.elapsed().as_secs_f64();
+        if now - self.mode_start >= MODE_SECS as f64 {
             let step = 1 + xorshift(&mut self.rng) as usize % (MODES.len() - 1); // never the same mode twice
             self.mode = (self.mode + step) % MODES.len();
-            self.mode_start = t;
+            self.mode_start = now;
             self.mode_delay = 0.0;
         }
-        let (black, fade) = fades(t, self.mode_start, self.mode_delay);
+        // Shader time restarts with each mode: a growing f32 loses precision after hours and motion stutters.
+        let t = (now - self.mode_start) as f32;
+        let (black, fade) = fades(now as f32, self.mode_start as f32, self.mode_delay);
 
         let (w, h) = (self.config.width as f32, self.config.height as f32);
         let mut rect = [0.0f32; 4];
@@ -378,6 +380,12 @@ mod tests {
                 assert!(src.contains(&format!("fn {}(", d.fs)), "{name}: missing {}", d.fs);
             }
         }
-        assert!(src.contains("const LSEG: f32 = 600.0;") && src.contains("const WSEG: f32 = 256.0;"));
+        let seg = |c: &str| -> u32 {
+            let rest = src.split(&format!("const {c}: f32 = ")).nth(1).expect(c);
+            rest[..rest.find(".0;").expect(c)].parse().expect(c)
+        };
+        let verts = |name: &str| MODES.iter().find(|m| m.0 == name).unwrap().1[0].verts;
+        assert_eq!(verts("Lissajous"), 2 * (seg("LSEG") + 1));
+        assert_eq!(verts("Waves"), 2 * (seg("WSEG") + 1));
     }
 }
