@@ -12,7 +12,11 @@ Needs a compositor with `wlr-layer-shell` (Hyprland, Sway, niri…) and Vulkan.
 cargo install --git https://github.com/itshalti/oled-screensaver --root ~/.local
 ```
 
-This builds and puts `ss-for-oled` in `~/.local/bin`.
+This builds and puts `ss-for-oled` in `~/.local/bin`. If the command is not found, add that folder to your `PATH`:
+
+```bash
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshenv   # bash: ~/.bashrc
+```
 
 ## Build from source
 
