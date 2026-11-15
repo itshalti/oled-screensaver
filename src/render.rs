@@ -1,12 +1,13 @@
-//! wgpu renderer: every mode is a set of procedural draws from `shaders/screensaver.wgsl`
-//! (no vertex buffers), blended additively over a black backdrop that fades in.
+//! wgpu renderer: every mode is a set of procedural draws from `shaders/screensaver.wgsl`,
+//! blended additively over a black backdrop that fades in. Pipes is the exception: 3D tubes
+//! from an instance buffer, drawn with a depth buffer and normal "over" blending.
 
 use std::{collections::HashMap, error::Error, f32::consts::PI, ptr::NonNull, time::Instant};
 
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle};
 use wayland_client::{Connection, Proxy, protocol::wl_surface::WlSurface};
 
-use crate::text;
+use crate::{pipes, text};
 
 const BLACK_FADE: f32 = 2.5; // desktop -> black
 const FIRST_DELAY: f32 = 1.8; // animation starts fading in while the black settles
@@ -32,7 +33,11 @@ const MODES: &[(&str, &[Draw])] = &[
     ("Lissajous", &[d("vs_liss", "fs_line", 2 * 601, 6)]),
     ("Waves", &[d("vs_wave", "fs_line", 2 * 257, 9)]),
     ("Clock", &[d("vs_dot", "fs_dot", 4, 140), d("vs_text", "fs_text", 4, 1)]),
+    ("Pipes", &[d("vs_pipe", "fs_pipe", PIPE_VERTS, 0)]), // instance count comes from the simulation
 ];
+
+const PIPE_VERTS: u32 = 8 * 16 * 6; // PL rings * PS sides * 2 triangles, see the shader
+const DEPTH: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
 pub struct Renderer {
     surface: wgpu::Surface<'static>,
@@ -54,6 +59,10 @@ pub struct Renderer {
     rng: u64,
     allowed: Vec<usize>,
     mode_secs: f32,
+    pipes: pipes::Pipes,
+    pipe_buf: wgpu::Buffer,
+    uploaded: usize, // pieces already in pipe_buf
+    depth: wgpu::TextureView,
 }
 
 impl Renderer {
@@ -141,23 +150,44 @@ impl Renderer {
         let mut pipelines = HashMap::new();
         for (_, draws) in MODES {
             for dr in *draws {
+                let pipe = dr.vs == "vs_pipe";
+                let instances = [Some(wgpu::VertexBufferLayout {
+                    array_stride: 32,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x4, 1 => Uint32x4],
+                })];
                 pipelines.entry((dr.vs, dr.fs)).or_insert_with(|| {
                     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                         label: Some(dr.fs),
                         layout: Some(&layout),
-                        vertex: wgpu::VertexState { module: &module, entry_point: Some(dr.vs), compilation_options: Default::default(), buffers: &[] },
+                        vertex: wgpu::VertexState {
+                            module: &module,
+                            entry_point: Some(dr.vs),
+                            compilation_options: Default::default(),
+                            buffers: if pipe { &instances } else { &[] },
+                        },
                         fragment: Some(wgpu::FragmentState {
                             module: &module,
                             entry_point: Some(dr.fs),
                             compilation_options: Default::default(),
                             targets: &[Some(wgpu::ColorTargetState {
                                 format,
-                                blend: Some(wgpu::BlendState { color: add, alpha: add }),
+                                // solid tubes hide each other, so they draw "over" rather than add up
+                                blend: Some(if pipe { wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING } else { wgpu::BlendState { color: add, alpha: add } }),
                                 write_mask: wgpu::ColorWrites::ALL,
                             })],
                         }),
-                        primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleStrip, ..Default::default() },
-                        depth_stencil: None,
+                        primitive: wgpu::PrimitiveState {
+                            topology: if pipe { wgpu::PrimitiveTopology::TriangleList } else { wgpu::PrimitiveTopology::TriangleStrip },
+                            ..Default::default()
+                        },
+                        depth_stencil: pipe.then(|| wgpu::DepthStencilState {
+                            format: DEPTH,
+                            depth_write_enabled: Some(true),
+                            depth_compare: Some(wgpu::CompareFunction::Less),
+                            stencil: Default::default(),
+                            bias: Default::default(),
+                        }),
                         multisample: Default::default(),
                         multiview_mask: None,
                         cache: None,
@@ -183,6 +213,13 @@ impl Renderer {
         let forced = std::env::var("SCREENSAVER_MODE").ok().and_then(|m| mode_index(&m));
         let mode = forced.unwrap_or_else(|| allowed[xorshift(&mut rng) as usize % allowed.len()]);
 
+        let pipe_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("pipes"),
+            size: (pipes::CAPACITY * 32) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let depth = make_depth(&device, config.width, config.height);
         let placeholder = Self::make_bind_group(&device, &queue, &bgl, &ubuf, &sampler, 1, 1, &[0, 0]);
         Ok(Self {
             surface,
@@ -204,6 +241,10 @@ impl Renderer {
             rng,
             allowed,
             mode_secs,
+            pipes: pipes::Pipes::new(rng),
+            pipe_buf,
+            uploaded: 0,
+            depth,
         })
     }
 
@@ -252,6 +293,7 @@ impl Renderer {
             self.config.width = w;
             self.config.height = h;
             self.surface.configure(&self.device, &self.config);
+            self.depth = make_depth(&self.device, w, h);
         }
     }
 
@@ -276,10 +318,26 @@ impl Renderer {
             self.mode = next_mode(&self.allowed, self.mode, xorshift(&mut self.rng));
             self.mode_start = now;
             self.mode_delay = 0.0;
+            self.pipes = pipes::Pipes::new(xorshift(&mut self.rng)); // fresh scene each time Pipes comes up
+            self.uploaded = 0;
         }
         // Shader time restarts with each mode: a growing f32 loses precision after hours and motion stutters.
         let t = (now - self.mode_start) as f32;
-        let (black, fade) = fades(now as f32, self.mode_start as f32, self.mode_delay, self.mode_secs);
+        let (black, mut fade) = fades(now as f32, self.mode_start as f32, self.mode_delay, self.mode_secs);
+        let is_pipes = MODES[self.mode].0 == "Pipes";
+        if is_pipes {
+            self.pipes.update(t);
+            let n = self.pipes.pieces.len();
+            if n < self.uploaded {
+                self.uploaded = 0; // the scene restarted
+            }
+            if n > self.uploaded {
+                let bytes = pipes::Piece::bytes(&self.pipes.pieces[self.uploaded..]);
+                self.queue.write_buffer(&self.pipe_buf, (self.uploaded * 32) as u64, &bytes);
+                self.uploaded = n;
+            }
+            fade *= self.pipes.fade(t);
+        }
 
         let (w, h) = (self.config.width as f32, self.config.height as f32);
         let mut rect = [0.0f32; 4];
@@ -315,6 +373,11 @@ impl Renderer {
                         store: wgpu::StoreOp::Store,
                     },
                 })],
+                depth_stencil_attachment: is_pipes.then_some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth,
+                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Discard }),
+                    stencil_ops: None,
+                }),
                 ..Default::default()
             });
             pass.set_bind_group(0, &self.bind_group, &[]);
@@ -323,7 +386,12 @@ impl Renderer {
                     continue; // no font found
                 }
                 pass.set_pipeline(&self.pipelines[&(dr.vs, dr.fs)]);
-                pass.draw(0..dr.verts, 0..dr.insts);
+                if dr.vs == "vs_pipe" {
+                    pass.set_vertex_buffer(0, self.pipe_buf.slice(..));
+                    pass.draw(0..dr.verts, 0..self.uploaded as u32);
+                } else {
+                    pass.draw(0..dr.verts, 0..dr.insts);
+                }
             }
         }
         self.queue.submit([enc.finish()]);
@@ -340,6 +408,21 @@ fn fades(t: f32, mode_start: f32, delay: f32, mode_secs: f32) -> (f32, f32) {
     (ease(t / BLACK_FADE), content)
 }
 
+fn make_depth(device: &wgpu::Device, w: u32, h: u32) -> wgpu::TextureView {
+    device
+        .create_texture(&wgpu::TextureDescriptor {
+            label: Some("depth"),
+            size: wgpu::Extent3d { width: w.max(1), height: h.max(1), depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: DEPTH,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        })
+        .create_view(&Default::default())
+}
+
 /// Index of a mode by name, ignoring case.
 pub fn mode_index(name: &str) -> Option<usize> {
     MODES.iter().position(|(n, _)| n.eq_ignore_ascii_case(name))
@@ -351,7 +434,7 @@ fn next_mode(allowed: &[usize], current: usize, rnd: u64) -> usize {
     if others.is_empty() { current } else { others[rnd as usize % others.len()] }
 }
 
-fn xorshift(s: &mut u64) -> u64 {
+pub(crate) fn xorshift(s: &mut u64) -> u64 {
     *s ^= *s << 13;
     *s ^= *s >> 7;
     *s ^= *s << 17;
@@ -422,5 +505,7 @@ mod tests {
         let verts = |name: &str| MODES.iter().find(|m| m.0 == name).unwrap().1[0].verts;
         assert_eq!(verts("Lissajous"), 2 * (seg("LSEG") + 1));
         assert_eq!(verts("Waves"), 2 * (seg("WSEG") + 1));
+        assert!(src.contains("const PL: u32 = 8u;") && src.contains("const PS: u32 = 16u;") && PIPE_VERTS == 8 * 16 * 6);
+        assert!(src.contains(&format!("const PSTEP: f32 = {:?};", pipes::STEP)), "shader growth speed must match pipes::STEP");
     }
 }

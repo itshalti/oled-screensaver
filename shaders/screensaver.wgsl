@@ -205,3 +205,107 @@ fn wave_y(x: f32, i: f32, k: f32) -> f32 {
     let a = max(m.r, m.g) * 0.75;
     return vec4f(c * 0.75 * u.fade, a * u.fade);
 }
+
+// ---------- Pipes: tubes through a 3D grid (instances from pipes.rs) ----------
+const PL: u32 = 8u;       // rings along one piece
+const PS: u32 = 16u;      // sides around the tube
+const PSTEP: f32 = 0.22;  // seconds per cell, as STEP in pipes.rs
+const PR: f32 = 0.17;     // tube radius in cells
+
+struct PipeOut {
+    @builtin(position) pos: vec4f,
+    @location(0) n: vec3f,
+    @location(1) w: vec3f,
+    @location(2) @interpolate(flat) color: u32,
+};
+
+var<private> PIPE_COLORS: array<vec3f, 8> = array<vec3f, 8>(
+    vec3f(1.0, 0.42, 0.12), vec3f(0.85, 0.75, 0.15), vec3f(0.35, 0.9, 0.4), vec3f(0.9, 0.9, 0.9),
+    vec3f(0.25, 0.5, 1.0), vec3f(0.95, 0.2, 0.25), vec3f(0.2, 0.85, 0.9), vec3f(0.7, 0.35, 0.95));
+
+fn dir3(i: u32) -> vec3f {
+    let s = 1.0 - 2.0 * f32(i & 1u);
+    if (i < 2u) { return vec3f(s, 0.0, 0.0); }
+    if (i < 4u) { return vec3f(0.0, s, 0.0); }
+    return vec3f(0.0, 0.0, s);
+}
+
+// slow orbit around the grid, gently bobbing up and down
+fn pipe_eye() -> vec3f {
+    let a = u.time * 0.06;
+    return vec3f(sin(a) * 12.5, 3.0 + 4.0 * sin(u.time * 0.037), cos(a) * 12.5);
+}
+
+fn pipe_clip(p: vec3f) -> vec4f {
+    let eye = pipe_eye();
+    let f = normalize(-eye);
+    let r = normalize(cross(f, vec3f(0.0, 1.0, 0.0)));
+    let up = cross(r, f);
+    let q = p - eye;
+    let v = vec3f(dot(q, r), dot(q, up), dot(q, f)); // view space, +z forward
+    let fl = 1.0 / tan(0.45);                          // ~52 degree vertical field of view
+    let near = 0.1;
+    let far = 80.0;
+    return vec4f(v.x * fl * u.res.y / u.res.x, v.y * fl, (v.z - near) * far / (far - near), v.z);
+}
+
+@vertex fn vs_pipe(@builtin(vertex_index) v: u32, @location(0) pb: vec4f, @location(1) info: vec4u) -> PipeOut {
+    // 6 vertices per quad; corner pattern (0,0)(1,0)(0,1) (0,1)(1,0)(1,1)
+    let quad = v / 6u;
+    let k = v % 6u;
+    let i = quad / PS + ((50u >> k) & 1u); // ring 0..PL
+    let j = quad % PS + ((44u >> k) & 1u); // side 0..PS
+    let kind = info.z;
+    let len = select(1.0, 0.5, kind == 1u || kind == 2u);
+    let grow = clamp((u.time - pb.w) / (PSTEP * len), 0.0, 1.0);
+    let phi = f32(j) / f32(PS) * 6.2831853;
+    var p: vec3f;
+    var n: vec3f;
+    if (kind == 3u) {
+        // ball at a pipe's start or end
+        let th = f32(i) / f32(PL) * 3.14159265;
+        n = vec3f(sin(th) * cos(phi), cos(th), sin(th) * sin(phi));
+        p = pb.xyz + n * PR * 1.4 * grow;
+    } else {
+        let s = f32(i) / f32(PL) * grow;
+        let din = dir3(info.x);
+        let dout = dir3(info.y);
+        var c: vec3f;
+        var t: vec3f;
+        var b: vec3f;
+        if (kind == 0u && info.x != info.y) {
+            // quarter-torus elbow from the entry midpoint to the exit midpoint
+            let a = s * 1.5707963;
+            let ctr = pb.xyz + dout * 0.5;
+            c = ctr - dout * 0.5 * cos(a) + din * 0.5 * sin(a);
+            t = din * cos(a) + dout * sin(a);
+            b = normalize(cross(din, dout));
+        } else {
+            let d = select(din, dout, kind == 1u);
+            c = pb.xyz + d * s * len;
+            t = d;
+            b = select(vec3f(0.0, 1.0, 0.0), vec3f(1.0, 0.0, 0.0), abs(d.y) > 0.5);
+        }
+        n = cross(t, b) * cos(phi) + b * sin(phi);
+        p = c + n * PR;
+    }
+    var o: PipeOut;
+    o.pos = pipe_clip(p);
+    o.n = n;
+    o.w = p;
+    o.color = info.w;
+    return o;
+}
+
+@fragment fn fs_pipe(i: PipeOut) -> @location(0) vec4f {
+    let n = normalize(i.n);
+    let to_eye = pipe_eye() - i.w;
+    let vdir = normalize(to_eye);
+    let l = normalize(vdir + vec3f(0.3, 0.9, 0.2)); // light from above, following the camera
+    let h = normalize(l + vdir);
+    let base = PIPE_COLORS[i.color % 8u];
+    let diff = max(dot(n, l), 0.0);
+    let spec = pow(max(dot(n, h), 0.0), 48.0);
+    let depth = exp(-max(length(to_eye) - 9.0, 0.0) * 0.07); // farther pipes are darker
+    return out((base * (0.1 + 0.9 * diff) + vec3f(0.55) * spec) * depth, 1.0);
+}

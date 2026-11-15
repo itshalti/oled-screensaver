@@ -3,6 +3,7 @@
 //! compositor reports the user idle (ext-idle-notify); `install` registers that as a systemd user service.
 
 mod config;
+mod pipes;
 mod render;
 mod text;
 
