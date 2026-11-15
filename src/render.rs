@@ -8,8 +8,6 @@ use wayland_client::{Connection, Proxy, protocol::wl_surface::WlSurface};
 
 use crate::text;
 
-/// Seconds per mode before switching to another random one.
-const MODE_SECS: f32 = 300.0;
 const BLACK_FADE: f32 = 2.5; // desktop -> black
 const FIRST_DELAY: f32 = 1.8; // animation starts fading in while the black settles
 const FADE_IN: f32 = 3.0;
@@ -54,10 +52,13 @@ pub struct Renderer {
     mode_start: f64,
     mode_delay: f32,
     rng: u64,
+    allowed: Vec<usize>,
+    mode_secs: f32,
 }
 
 impl Renderer {
-    pub async fn new(conn: &Connection, wl_surface: &WlSurface, w: u32, h: u32) -> Result<Self, Box<dyn Error>> {
+    /// `allowed`: indices into the mode table (empty = all), `mode_secs`: time per mode.
+    pub async fn new(conn: &Connection, wl_surface: &WlSurface, w: u32, h: u32, allowed: Vec<usize>, mode_secs: f32) -> Result<Self, Box<dyn Error>> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor { backends: wgpu::Backends::VULKAN, ..wgpu::InstanceDescriptor::new_without_display_handle() });
         let target = wgpu::SurfaceTargetUnsafe::RawHandle {
             raw_display_handle: Some(RawDisplayHandle::Wayland(WaylandDisplayHandle::new(
@@ -178,8 +179,9 @@ impl Renderer {
         });
 
         let mut rng = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(1) | 1;
-        let forced = std::env::var("SCREENSAVER_MODE").ok().and_then(|m| MODES.iter().position(|(n, _)| n.eq_ignore_ascii_case(&m)));
-        let mode = forced.unwrap_or_else(|| (xorshift(&mut rng) % MODES.len() as u64) as usize);
+        let allowed = if allowed.is_empty() { (0..MODES.len()).collect() } else { allowed };
+        let forced = std::env::var("SCREENSAVER_MODE").ok().and_then(|m| mode_index(&m));
+        let mode = forced.unwrap_or_else(|| allowed[xorshift(&mut rng) as usize % allowed.len()]);
 
         let placeholder = Self::make_bind_group(&device, &queue, &bgl, &ubuf, &sampler, 1, 1, &[0, 0]);
         Ok(Self {
@@ -200,6 +202,8 @@ impl Renderer {
             mode_start: 0.0,
             mode_delay: FIRST_DELAY,
             rng,
+            allowed,
+            mode_secs,
         })
     }
 
@@ -268,15 +272,14 @@ impl Renderer {
     /// Draws one frame; returns true once the backdrop is fully black (surface opaque).
     pub fn render(&mut self) -> bool {
         let now = self.start.elapsed().as_secs_f64();
-        if now - self.mode_start >= MODE_SECS as f64 {
-            let step = 1 + xorshift(&mut self.rng) as usize % (MODES.len() - 1); // never the same mode twice
-            self.mode = (self.mode + step) % MODES.len();
+        if now - self.mode_start >= self.mode_secs as f64 {
+            self.mode = next_mode(&self.allowed, self.mode, xorshift(&mut self.rng));
             self.mode_start = now;
             self.mode_delay = 0.0;
         }
         // Shader time restarts with each mode: a growing f32 loses precision after hours and motion stutters.
         let t = (now - self.mode_start) as f32;
-        let (black, fade) = fades(now as f32, self.mode_start as f32, self.mode_delay);
+        let (black, fade) = fades(now as f32, self.mode_start as f32, self.mode_delay, self.mode_secs);
 
         let (w, h) = (self.config.width as f32, self.config.height as f32);
         let mut rect = [0.0f32; 4];
@@ -331,10 +334,21 @@ impl Renderer {
 
 /// (backdrop opacity, animation opacity) at `t` seconds since start, for a mode that
 /// began at `mode_start` and waits `delay` before fading in.
-fn fades(t: f32, mode_start: f32, delay: f32) -> (f32, f32) {
+fn fades(t: f32, mode_start: f32, delay: f32, mode_secs: f32) -> (f32, f32) {
     let ease = |x: f32| 0.5 - 0.5 * (PI * x.clamp(0.0, 1.0)).cos();
-    let content = ease((t - mode_start - delay) / FADE_IN).min(ease((mode_start + MODE_SECS - t) / FADE_OUT));
+    let content = ease((t - mode_start - delay) / FADE_IN).min(ease((mode_start + mode_secs - t) / FADE_OUT));
     (ease(t / BLACK_FADE), content)
+}
+
+/// Index of a mode by name, ignoring case.
+pub fn mode_index(name: &str) -> Option<usize> {
+    MODES.iter().position(|(n, _)| n.eq_ignore_ascii_case(name))
+}
+
+/// A random allowed mode other than `current` (stays put when only one is allowed).
+fn next_mode(allowed: &[usize], current: usize, rnd: u64) -> usize {
+    let others: Vec<usize> = allowed.iter().copied().filter(|&m| m != current).collect();
+    if others.is_empty() { current } else { others[rnd as usize % others.len()] }
 }
 
 fn xorshift(s: &mut u64) -> u64 {
@@ -347,30 +361,49 @@ fn xorshift(s: &mut u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    const MODE_SECS: f32 = 300.0;
 
     #[test]
     fn backdrop_fades_in_once_and_stays_black() {
-        let (b0, _) = fades(0.0, 0.0, FIRST_DELAY);
+        let (b0, _) = fades(0.0, 0.0, FIRST_DELAY, MODE_SECS);
         assert_eq!(b0, 0.0, "starts transparent so the desktop is visible");
         let mut prev = 0.0;
         for i in 0..=100 {
-            let (b, _) = fades(i as f32 * 0.05, 0.0, FIRST_DELAY);
+            let (b, _) = fades(i as f32 * 0.05, 0.0, FIRST_DELAY, MODE_SECS);
             assert!(b >= prev, "backdrop must never brighten back to the desktop");
             prev = b;
         }
-        assert_eq!(fades(BLACK_FADE, 0.0, FIRST_DELAY).0, 1.0);
-        assert_eq!(fades(10_000.0, 0.0, FIRST_DELAY).0, 1.0);
+        assert_eq!(fades(BLACK_FADE, 0.0, FIRST_DELAY, MODE_SECS).0, 1.0);
+        assert_eq!(fades(10_000.0, 0.0, FIRST_DELAY, MODE_SECS).0, 1.0);
     }
 
     #[test]
     fn animation_fades_in_after_delay_and_out_before_switch() {
-        assert_eq!(fades(FIRST_DELAY, 0.0, FIRST_DELAY).1, 0.0);
-        assert_eq!(fades(FIRST_DELAY + FADE_IN, 0.0, FIRST_DELAY).1, 1.0);
-        assert_eq!(fades(MODE_SECS / 2.0, 0.0, FIRST_DELAY).1, 1.0);
-        assert!(fades(MODE_SECS - FADE_OUT / 2.0, 0.0, FIRST_DELAY).1 < 1.0);
-        assert_eq!(fades(MODE_SECS, 0.0, FIRST_DELAY).1, 0.0);
+        assert_eq!(fades(FIRST_DELAY, 0.0, FIRST_DELAY, MODE_SECS).1, 0.0);
+        assert_eq!(fades(FIRST_DELAY + FADE_IN, 0.0, FIRST_DELAY, MODE_SECS).1, 1.0);
+        assert_eq!(fades(MODE_SECS / 2.0, 0.0, FIRST_DELAY, MODE_SECS).1, 1.0);
+        assert!(fades(MODE_SECS - FADE_OUT / 2.0, 0.0, FIRST_DELAY, MODE_SECS).1 < 1.0);
+        assert_eq!(fades(MODE_SECS, 0.0, FIRST_DELAY, MODE_SECS).1, 0.0);
         // next mode starts at MODE_SECS without the initial delay
-        assert_eq!(fades(MODE_SECS + FADE_IN, MODE_SECS, 0.0).1, 1.0);
+        assert_eq!(fades(MODE_SECS + FADE_IN, MODE_SECS, 0.0, MODE_SECS).1, 1.0);
+    }
+
+    #[test]
+    fn next_mode_never_repeats_and_stays_allowed() {
+        let allowed = [0, 2, 5];
+        for rnd in 0..50 {
+            for cur in allowed {
+                let n = next_mode(&allowed, cur, rnd);
+                assert!(n != cur && allowed.contains(&n));
+            }
+        }
+        assert_eq!(next_mode(&[3], 3, 7), 3, "a single mode stays");
+    }
+
+    #[test]
+    fn short_custom_mode_time_still_fades_out() {
+        assert_eq!(fades(30.0, 0.0, 0.0, 30.0).1, 0.0);
+        assert_eq!(fades(15.0, 0.0, 0.0, 30.0).1, 1.0);
     }
 
     #[test]
