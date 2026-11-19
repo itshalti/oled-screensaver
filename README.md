@@ -2,7 +2,7 @@
 
 Animated screensaver for OLED monitors on Wayland. Pure black background, nothing stays still. Rendered on the GPU (~2% CPU).
 
-Modes: topographic lines, clock, starfield, aurora, Lissajous, waves, 3D pipes.
+Modes: topographic lines, clock, starfield, aurora, Lissajous, waves, 3D pipes, a pixel-art world with a day/night cycle, torch-lit caves, water and lava.
 
 Needs a compositor with `wlr-layer-shell` and `ext-idle-notify` (Hyprland, Sway, niri…), Vulkan and systemd.
 
@@ -40,7 +40,7 @@ Edit `~/.config/ss-for-oled/config.toml` in any text editor and save. Changes ap
 ```toml
 timeout = 600        # seconds without input before it starts
 output = "DP-1"      # monitor name: see `hyprctl monitors` (Sway: `swaymsg -t get_outputs`)
-modes = []           # modes to show; empty = all: Topo, Starfield, Aurora, Lissajous, Waves, Clock, Pipes
+modes = []           # modes to show; empty = all: Topo, Starfield, Aurora, Lissajous, Waves, Clock, Pipes, Sandbox
 mode_minutes = 5     # minutes per mode before switching
 fps = 0              # frame cap; 0 = monitor refresh rate (smoothest)
 ```

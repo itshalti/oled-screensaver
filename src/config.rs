@@ -15,7 +15,7 @@ timeout = 600
 output = "DP-1"
 
 # Modes to rotate through; empty = all.
-# Topo, Starfield, Aurora, Lissajous, Waves, Clock, Pipes
+# Topo, Starfield, Aurora, Lissajous, Waves, Clock, Pipes, Sandbox
 modes = []
 
 # Minutes per mode before switching to another.

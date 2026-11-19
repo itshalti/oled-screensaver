@@ -34,6 +34,7 @@ const MODES: &[(&str, &[Draw])] = &[
     ("Waves", &[d("vs_wave", "fs_line", 2 * 257, 9)]),
     ("Clock", &[d("vs_dot", "fs_dot", 4, 140), d("vs_text", "fs_text", 4, 1)]),
     ("Pipes", &[d("vs_pipe", "fs_pipe", PIPE_VERTS, 0)]), // instance count comes from the simulation
+    ("Sandbox", &[d("vs_full", "fs_sandbox", 3, 1)]),
 ];
 
 const PIPE_VERTS: u32 = 8 * 16 * 6; // PL rings * PS sides * 2 triangles, see the shader
