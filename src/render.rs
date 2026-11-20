@@ -211,7 +211,13 @@ impl Renderer {
 
         let mut rng = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(1) | 1;
         let allowed = if allowed.is_empty() { (0..MODES.len()).collect() } else { allowed };
-        let forced = std::env::var("SCREENSAVER_MODE").ok().and_then(|m| mode_index(&m));
+        let forced = std::env::var("SCREENSAVER_MODE").ok().and_then(|m| {
+            let i = mode_index(&m);
+            if i.is_none() {
+                eprintln!("SCREENSAVER_MODE: unknown mode {m:?} ignored");
+            }
+            i
+        });
         let mode = forced.unwrap_or_else(|| allowed[xorshift(&mut rng) as usize % allowed.len()]);
 
         let pipe_buf = device.create_buffer(&wgpu::BufferDescriptor {
