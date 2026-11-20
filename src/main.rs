@@ -3,6 +3,7 @@
 //! compositor reports the user idle (ext-idle-notify); `install` registers that as a systemd user service.
 
 mod config;
+mod media;
 mod pipes;
 mod render;
 mod text;
@@ -273,22 +274,43 @@ fn daemon() -> Result<(), Box<dyn Error>> {
     let mut note = notifier.get_idle_notification(cfg.timeout * 1000, &seat, &qh, ());
     eprintln!("starting after {} s idle (config: {})", cfg.timeout, path.display());
     let mut child: Option<std::process::Child> = None;
-    let mut idle = Idle(None);
+    let mut event = Idle(None);
+    let mut idle = false; // compositor says idle and the screensaver is not up yet
+    let mut quiet: Option<Instant> = None; // since when no (non-ignored) player is playing
+    let mut waiting_on: Option<String> = None;
     loop {
-        queue.dispatch_pending(&mut idle)?;
+        queue.dispatch_pending(&mut event)?;
         queue.flush()?;
-        match idle.0.take() {
-            Some(true) if running_pid().is_none() => {
-                eprintln!("idle: starting screensaver");
-                child = Some(spawn_saver(true)?);
+        let timeout = Duration::from_secs(cfg.timeout.into());
+        match event.0.take() {
+            Some(true) => {
+                idle = true;
+                // the compositor already counted `timeout` of inactivity
+                quiet = Some(Instant::now().checked_sub(timeout).unwrap_or_else(Instant::now));
             }
             Some(false) => {
+                (idle, quiet, waiting_on) = (false, None, None);
                 if running_pid().is_some() {
                     eprintln!("compositor says active again: stopping screensaver");
                 }
                 stop()?;
             }
-            _ => {}
+            None => {}
+        }
+        if idle && running_pid().is_none() {
+            let player = media::playing(&cfg.ignore_players);
+            if player != waiting_on {
+                match &player {
+                    Some(p) => eprintln!("idle, but {p} is playing: waiting"),
+                    None => eprintln!("playback stopped: starting after {} s more idle", cfg.timeout),
+                }
+                waiting_on.clone_from(&player);
+            }
+            if due(&mut quiet, player.is_some(), Instant::now(), timeout) {
+                eprintln!("idle: starting screensaver");
+                child = Some(spawn_saver(true)?);
+                idle = false; // until the next idle period
+            }
         }
         if child.as_mut().is_some_and(|c| c.try_wait().ok().flatten().is_some()) {
             child = None; // reaped
@@ -305,6 +327,16 @@ fn daemon() -> Result<(), Box<dyn Error>> {
         }
         wait(&mut queue, Duration::from_secs(2))?;
     }
+}
+
+/// Whether the screensaver should start now: nothing (not ignored) is playing and it has been
+/// quiet for `timeout`. Playback resets the wait, so a paused film gets the full timeout.
+fn due(quiet: &mut Option<Instant>, playing: bool, now: Instant, timeout: Duration) -> bool {
+    if playing {
+        *quiet = None;
+        return false;
+    }
+    now.duration_since(*quiet.get_or_insert(now)) >= timeout
 }
 
 impl Dispatch<WlRegistry, GlobalListContents> for Idle {
@@ -469,6 +501,28 @@ mod tests {
         assert!(!s.exit);
         s.pointer_at(1634.5, 1393.0, true); // small steps add up: a real slow move
         assert!(s.exit);
+    }
+
+    #[test]
+    fn playback_postpones_the_screensaver_by_a_full_timeout() {
+        let t = Duration::from_secs(600);
+        let start = Instant::now();
+        let at = |s: u64| start + Duration::from_secs(s);
+        // idle reported with nothing playing: start at once
+        let mut quiet = Some(start - t);
+        assert!(due(&mut quiet, false, at(0), t));
+        // a video plays: wait, however long
+        let mut quiet = Some(start - t);
+        assert!(!due(&mut quiet, true, at(0), t));
+        assert!(!due(&mut quiet, true, at(5000), t));
+        // paused at 5002 s: start only a full timeout later
+        assert!(!due(&mut quiet, false, at(5002), t));
+        assert!(!due(&mut quiet, false, at(5500), t));
+        // played again briefly: the wait starts over
+        assert!(!due(&mut quiet, true, at(5550), t));
+        assert!(!due(&mut quiet, false, at(5560), t));
+        assert!(!due(&mut quiet, false, at(6100), t));
+        assert!(due(&mut quiet, false, at(6160), t));
     }
 
     #[test]

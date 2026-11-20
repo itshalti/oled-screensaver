@@ -23,6 +23,10 @@ mode_minutes = 5
 
 # Frame cap; 0 = monitor refresh rate (smoothest).
 fps = 0
+
+# While a player reports playback (YouTube in the browser, mpv, VLC...), the screensaver waits.
+# Players listed here don't count, e.g. music. Names as in `playerctl -l` / MPRIS: spotify, firefox, chromium
+ignore_players = ["spotify"]
 "#;
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -33,11 +37,12 @@ pub struct Config {
     pub modes: Vec<String>,
     pub mode_minutes: f32,
     pub fps: f64,
+    pub ignore_players: Vec<String>,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Self { timeout: 600, output: "DP-1".into(), modes: Vec::new(), mode_minutes: 5.0, fps: 0.0 }
+        Self { timeout: 600, output: "DP-1".into(), modes: Vec::new(), mode_minutes: 5.0, fps: 0.0, ignore_players: vec!["spotify".into()] }
     }
 }
 

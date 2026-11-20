@@ -29,7 +29,7 @@ If your shell (Noctalia, Hyprland's hypridle, …) also runs a screensaver on id
 2. Then it shows the screensaver on your monitor: the screen fades to black and an animation fades in.
 3. Every few minutes it switches to another random mode.
 4. Any key, click, scroll or mouse movement closes it at once. Popups appearing under a resting cursor do not count.
-5. While something blocks idle (a playing video, a game, a call), the screensaver does not start.
+5. While a video plays (YouTube in the browser, mpv, VLC…) or an app blocks idle (a game, a call), the screensaver does not start. After playback stops it waits the full `timeout` again. Music in Spotify does not count (`ignore_players`).
 
 The service starts with your graphical session and rereads the config whenever you save it.
 
@@ -43,6 +43,7 @@ output = "DP-1"      # monitor name: see `hyprctl monitors` (Sway: `swaymsg -t g
 modes = []           # modes to show; empty = all: Topo, Starfield, Aurora, Lissajous, Waves, Clock, Pipes, Sandbox
 mode_minutes = 5     # minutes per mode before switching
 fps = 0              # frame cap; 0 = monitor refresh rate (smoothest)
+ignore_players = ["spotify"]   # players whose playback does not keep it away
 ```
 
 A missing key keeps its default. If the file has an error (a typo in a key, text instead of a number), the defaults are used and the reason is written to the log (see [Service](#service)).
@@ -71,6 +72,12 @@ Use less power on a high refresh rate monitor:
 
 ```toml
 fps = 60
+```
+
+Let music in the browser through as well (videos there will no longer block it):
+
+```toml
+ignore_players = ["spotify", "firefox"]
 ```
 
 Keep one mode all the time:
